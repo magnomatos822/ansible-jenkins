@@ -1,0 +1,6 @@
+vms:
+  hosts:
+    ubuntu:
+      ansible_host: 10.0.0.78
+      ansible_connection: ssh
+      ansible_user: ab

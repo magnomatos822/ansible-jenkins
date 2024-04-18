@@ -1,0 +1,11 @@
+[jenkins]
+10.0.0.78
+
+[jenkins:vars]
+ansible_user=ab
+ansible_connection=ssh
+ansible_host= 10.0.0.78
+ansible_sudo_pass=abnadan@1808
+host_key_checking = False
+
+
