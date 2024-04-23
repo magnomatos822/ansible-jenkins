@@ -1,0 +1,213 @@
+def sendDiscordMessage(String errorMessage, String discordWebhookUrl) {
+    def color = errorMessage ? 16711680 : 65280 // Red: 16711680 (0xFF0000), Green: 65280 (0x00FF00)
+
+    def message = """
+    Status do pipeline do Jenkins:
+    Job: ${env.JOB_NAME}
+    Imagem Version: ${env.GIT_COMMIT}
+    Branch: ${env.GIT_BRANCH}
+    Situação: ${errorMessage ?: 'No error message available'}
+
+    Informações adicionais:
+    Build Number: ${env.BUILD_NUMBER}
+    Build URL: ${env.BUILD_URL}
+    Data/Hora: ${new Date().format('dd/MM/yyyy HH:mm:ss')}
+    Node: ${env.NODE_NAME}
+    Workspace: ${env.WORKSPACE}
+    Git URL: ${env.GIT_URL}
+
+    """
+
+    def payload = [
+        content: message,
+        embeds: [
+            [
+                title: errorMessage ? 'Falha' : 'Sucesso',
+                color: color
+            ]
+        ],
+    // file: [
+    //     name: 'log.txt',
+    //     content: new File(env.LOG_FILE_PATH).text
+    // ]
+    ]
+
+    def payloadJson = new groovy.json.JsonBuilder(payload).toString()
+
+    httpRequest(
+        consoleLogResponseBody: true,
+        contentType: 'APPLICATION_JSON',
+        httpMode: 'POST',
+        requestBody: payloadJson,
+        url: discordWebhookUrl
+    )
+}
+
+pipeline {
+    agent any
+
+    environment {
+        // Insira os parametros do Registry
+        IMAGE_PROJECT = 'mulher-pcce' // Insira o nome do projeto no Registry
+
+        // Insira os parametros do GitHub do projeto a ser buildado
+        // GIT_CLONE_URL_K8S = 'git@github.com:desenvolvimentodeticpcce/k8s-mulher-pcce.git'
+        GIT_CLONE_URL_SWARM = 'git@github.com:pcce-redes/swarm-mulher-pcce.git'
+
+        // Insira os parametros do repositorio do GitHub onde estão os arquivos YAML do Kubernetes
+        // GIT_REPOSITORY_K8S = 'k8s-mulher-pcce' // Insira o nome do repositório no GitHub
+        GIT_REPOSITORY_SWARM = 'swarm-mulher-pcce' // Insira o nome do repositório no GitHub
+        // GIT_BRANCH_K8S = 'main' // Insira o nome do branch no GitHub
+        GIT_BRANCH_SWARM = 'main' // Insira o nome do branch no GitHub
+        // GIT_DEPLOYMENT_FILE_PATH_K8S = 'dev/back/deployment.yml' // Insira o nome do diretório dos arquivos YAML no GitHub
+        // GIT_DEPLOYMENT_FILE_PATH_K8S_HOMOLOG = 'homolog/back/deployment.yml' // Insira o nome do diretório dos arquivos YAML no GitHub
+        GIT_DEPLOYMENT_FILE_PATH_K8S_PROD = 'prod/back/docker-compose.yml' // Insira o nome do diretório dos arquivos YAML no GitHub
+
+        // Não altere as variáveis abaixo
+        IMAGE_NAME_PREFIX = 'mulher-pcce-back' // Insira o prefixo do nome da imagem
+        IMAGE_DNS = 'registry.policiacivil.ce.gov.br' // Insira o DNS correto aqui
+        LOG_FILE_PATH = 'log.txt'
+        IMAGE_NAME = '${IMAGE_DNS}/${IMAGE_PROJECT}/${IMAGE_NAME_PREFIX}'
+        GIT_COMMIT_HASH = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+        GIT_BRANCH_NAME = sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+        DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1098706665920024758/uOU4jrSelkzybMHVFCAd6wqnxBPRU70-FLReUXDBFZyLw6TqYplaSeBahGT84JTUKBuX' // Insira a URL correta aqui
+    // GIT_CONFIG_EMAIL = 'desenvolvimento.detic@policiacivil.ce.gov.br'
+    }
+
+    stages {
+        stage('Build Docker Image and Push to Registry') {
+            steps {
+                script {
+                    try {
+                        sh "docker build -t ${env.IMAGE_NAME}-${env.BRANCH_NAME}:${env.GIT_COMMIT_HASH} ."
+                        sh "docker push ${env.IMAGE_NAME}-${env.BRANCH_NAME}:${env.GIT_COMMIT_HASH}"
+                    } catch (Exception e) {
+                        sendDiscordMessage(e.getMessage(), DISCORD_WEBHOOK_URL)
+                        throw e
+                    }
+                }
+            }
+            post {
+                failure {
+                    echo 'Re-executando o estágio Build Docker Image'
+                    retry(3) {
+                    // Reexecutar o estágio Build Docker Image
+                    }
+                    catchError { error ->
+                        archiveArtifacts artifacts: 'error.log', onlyIfSuccessful: false
+                        sendDiscordMessage(error.getMessage(), DISCORD_WEBHOOK_URL)
+                    }
+                }
+            }
+        }
+
+        stage('Get Branch Git') {
+            steps {
+                script {
+                    try {
+                        env.GIT_BRANCH = sh(
+                            script: 'git rev-parse --abbrev-ref HEAD',
+                            returnStdout: true
+                        ).trim()
+                    } catch (Exception e) {
+                        sendDiscordMessage(e.getMessage(), DISCORD_WEBHOOK_URL)
+                        throw e
+                    }
+                }
+            }
+            post {
+                failure {
+                    echo 'Re-executando o estágio Obter Ramo Git'
+                    retry(3) {
+                    // Reexecutar o estágio Obter Ramo Git
+                    }
+                    catchError { error ->
+                        archiveArtifacts artifacts: 'error.log', onlyIfSuccessful: false
+                        sendDiscordMessage(error.getMessage(), DISCORD_WEBHOOK_URL)
+                    }
+                }
+            }
+        }
+        stage('Update YAML File on GitHub - Prod') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    try {
+                        withCredentials([sshUserPrivateKey(credentialsId: 'jenkins-github', keyFileVariable: 'SSH_KEYFILE', passphraseVariable: '', usernameVariable: 'SSH_USERNAME')]) {
+                            withEnv(['GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=no -i $SSH_KEYFILE']) {
+                                // gitHubPRStatus githubPRMessage('${GITHUB_PR_COND_REF} execução iniciada')
+                                sh """
+                                    git config --global user.name "${SSH_USERNAME}"
+                                    git config --global user.email "${GIT_CONFIG_EMAIL}"
+                                    git config pull.rebase false
+                                    rm -rf ${env.GIT_REPOSITORY_SWARM}
+                                    git clone ${env.GIT_CLONE_URL_SWARM}
+                                    cd ${env.GIT_REPOSITORY_SWARM}
+                                    sed -i "s|image: .*|image: ${env.IMAGE_NAME}-${env.BRANCH_NAME}:${env.GIT_COMMIT_HASH}|" ${GIT_DEPLOYMENT_FILE_PATH_K8S_PROD}
+                                    git add ${GIT_DEPLOYMENT_FILE_PATH_K8S_PROD}
+                                    git commit -m "Atualizar imagem no arquivo deployment ${env.GIT_REPOSITORY_SWARM}"
+                                    git pull origin ${env.GIT_BRANCH_SWARM}
+                                    git push origin ${env.GIT_BRANCH_SWARM}
+                                """
+                            }
+                        }
+                    } catch (Exception e) {
+                        sendDiscordMessage(e.getMessage(), DISCORD_WEBHOOK_URL)
+                        throw e
+                    }
+                }
+            }
+            post {
+                failure {
+                    echo 'Re-executando o estágio Atualizar Arquivo YAML'
+                    retry(3) {
+                    // Reexecutar o estágio Atualizar Arquivo YAML
+                    }
+                    catchError { error ->
+                        archiveArtifacts artifacts: 'error.log', onlyIfSuccessful: false
+                        sendDiscordMessage(error.getMessage(), DISCORD_WEBHOOK_URL)
+                    }
+                }
+            }
+        }
+
+        // stage('Send to Discord') {
+        //     steps {
+        //         script {
+        //             try {
+        //                 sendDiscordMessage('', DISCORD_WEBHOOK_URL)
+        //             } catch (Exception e) {
+        //                 sendDiscordMessage(e.getMessage(), DISCORD_WEBHOOK_URL)
+        //                 throw e
+        //             }
+        //         }
+        //     }
+        //     post {
+        //         failure {
+        //             echo 'Re-executando o estágio Enviar para Discord'
+        //             retry(3) {
+        //             // Reexecutar o estágio Enviar para Discord
+        //             }
+        //             catchError { error ->
+        //                 archiveArtifacts artifacts: 'error.log', onlyIfSuccessful: false
+        //                 sendDiscordMessage(error.getMessage(), DISCORD_WEBHOOK_URL)
+        //             }
+        //         }
+        //     }
+        // }
+        // stage('Clear artifacts in overlay directory') {
+        //     steps {
+        //         script {
+        //             try {
+        //                 sh 'echo "y" | docker builder prune -a'
+        //             } catch (Exception e) {
+        //                 sendDiscordMessage(e.getMessage(), DISCORD_WEBHOOK_URL)
+        //                 throw e
+        //             }
+        //         }
+        //     }
+        // }
+    }
+}

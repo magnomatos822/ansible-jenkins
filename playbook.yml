@@ -1,4 +1,4 @@
-- hosts: jenkins
+- hosts: cicd
   become: true
   become_user: root
   tasks:
@@ -34,7 +34,93 @@
       ansible.builtin.command:
         cmd: cat /var/lib/jenkins/secrets/initialAdminPassword
       register: jenkins_password
+      ignore_errors: true
 
-    - name: Prints two lines of messages, but only if there is an environment value set
+    - name: Prints senha primeiro acesso do jenkins.
       ansible.builtin.debug:
-        msg: "The password is {{ jenkins_password.stdout }}"
+        msg: "A senha inicial é: {{ jenkins_password.stdout }}"
+      when: jenkins_password.stdout != ''
+
+- name: Instalação do Docker
+  hosts: cicd
+  become: true
+  become_user: root
+  tasks:
+    - name: Install requirements
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg2
+          - software-properties-common
+          - lsb-release
+        state: present
+        update_cache: yes
+
+    - name: Add docker GPG key
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add docker repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu jammy stable"
+
+    - name: Install docker
+      ansible.builtin.apt:
+        name: docker-ce, docker-ce-cli, containerd.io
+        state: present
+        update_cache: yes
+    - name: Create group docker
+      ansible.builtin.group:
+        name: docker
+        state: present
+
+
+    - name: Add user to docker group
+      ansible.builtin.user:
+        name: jenkins
+        groups: docker
+        state: present
+        append: yes
+
+    - name: Restart docker
+      ansible.builtin.service:
+        name: docker
+        state: restarted
+        enabled: yes
+
+    - name: Restart Jenkins
+      ansible.builtin.service:
+        name: jenkins
+        state: restarted
+        enabled: false
+
+    - name: Testing docker installation Nginx
+      ansible.builtin.docker_container:
+        name: nginx
+        image: nginx
+        state: started
+        network_mode: host
+        ports:
+          - "8081:80"
+        volumes:
+          - /var/run/docker.sock:/var/run/docker.sock"
+        
+    - name: Add file in Nginx 
+      ansible.builtin.docker:
+        src:  ./index.html
+        dest: /usr/share/nginx/html
+        mode: 0755
+
+    - name: Add portainer
+      ansible.builtin.docker_container:
+        name: portainer
+        image: portainer/portainer
+        state: started
+        network_mode: host
+        ports:
+          - "8082:9000"
+        volumes:
+          - /var/run/docker.sock:/var/run/docker.sock"
